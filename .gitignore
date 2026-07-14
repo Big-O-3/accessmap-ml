@@ -1,0 +1,13 @@
+# Python virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Downloaded model weights (auto-downloaded on first run)
+*.pt
+weights/
+
+# Uploaded / temporary images
+uploads/
