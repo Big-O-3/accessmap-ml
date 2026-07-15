@@ -26,7 +26,7 @@ pip install -r requirements.txt
 ```
 
 > **First run note:** the first detection auto-downloads the model weights
-> (`yolov8s-world.pt`, ~338 MB) and a CLIP dependency. That's a one-time download; it's
+> (`yolov8s-world.pt`, ~26 MB) and a CLIP dependency. That's a one-time download; it's
 > cached afterward. CPU is fine for local development (a few seconds per image).
 
 ## Run the server
@@ -57,6 +57,13 @@ Or test the model directly, without the server:
 
 ```bash
 python test_detect.py
+```
+
+Run the unit tests (stdlib `unittest`, no extra deps; they stub the model so no
+weights are loaded):
+
+```bash
+python -m unittest test_features test_detector test_app
 ```
 
 ## Response shape
@@ -93,7 +100,8 @@ python test_detect.py
 | `features.py` | Detection prompts + mapping to frontend feature keys |
 | `detector.py` | Loads YOLO-World and runs `detect()` |
 | `app.py` | Flask server: `GET /health`, `POST /analyze` |
-| `test_detect.py` | Runs the detector on the sample image (no server) |
+| `test_detect.py` | Manual smoke check: runs the detector on the sample image (loads real weights) |
+| `test_features.py` / `test_detector.py` / `test_app.py` | `unittest` suites; stub the model so no weights load |
 | `samples/test.jpg` | Sample photo for testing |
 
 ## Notes
