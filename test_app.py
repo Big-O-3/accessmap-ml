@@ -1,15 +1,16 @@
 """
 test_app.py — tests for the Flask endpoints in app.py.
 
-app.py imports detector, which loads the real model at import time. As in
-test_detector.py, we install a fake `ultralytics` first so no weights are
-loaded. We then monkeypatch detector.detect via app's reference to it, so the
-HTTP layer is tested independently of the model: we control exactly what
-"detections" the endpoint sees and assert on status codes and JSON.
+app.py imports detector, which loads the real Grounding DINO model at import
+time. To keep these HTTP-layer tests fast, we install fake `torch`,
+`transformers`, and `PIL` modules before importing app (same approach as
+test_detector.py) so no weights are downloaded. We then monkeypatch
+app.detect to control exactly what "detections" the endpoint sees, and assert
+on status codes and JSON.
 
 Run:
     source venv/bin/activate
-    python -m unittest test_app
+    pytest test_app.py
 """
 
 import io
@@ -18,24 +19,51 @@ import types
 import unittest
 
 
-# Stub ultralytics before importing app -> detector (same reason as
-# test_detector.py: avoid loading the 26 MB weights just to test HTTP).
-_fake_ultralytics = types.ModuleType("ultralytics")
+def _install_fakes():
+    """Stub the heavy ML deps so importing app -> detector is instant."""
+    fake_torch = types.ModuleType("torch")
+
+    class _NoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *a):
+            return False
+
+    fake_torch.no_grad = lambda: _NoGrad()
+    sys.modules["torch"] = fake_torch
+
+    fake_tf = types.ModuleType("transformers")
+
+    class _Stub:
+        def __call__(self, *a, **k):
+            return {"input_ids": [[0]]}
+
+        def post_process_grounded_object_detection(self, *a, **k):
+            return [{"boxes": [], "labels": [], "scores": []}]
+
+    fake_tf.AutoProcessor = types.SimpleNamespace(from_pretrained=lambda *a, **k: _Stub())
+    fake_tf.AutoModelForZeroShotObjectDetection = types.SimpleNamespace(
+        from_pretrained=lambda *a, **k: _Stub()
+    )
+    sys.modules["transformers"] = fake_tf
+
+    fake_pil = types.ModuleType("PIL")
+    fake_image_mod = types.ModuleType("PIL.Image")
+
+    class _Img:
+        size = (800, 600)
+
+        def convert(self, _mode):
+            return self
+
+    fake_image_mod.open = lambda _path: _Img()
+    fake_pil.Image = fake_image_mod
+    sys.modules["PIL"] = fake_pil
+    sys.modules["PIL.Image"] = fake_image_mod
 
 
-class _StubYOLOWorld:
-    def __init__(self, *_args, **_kwargs):
-        pass
-
-    def set_classes(self, _classes):
-        pass
-
-    def predict(self, *_args, **_kwargs):
-        return []
-
-
-_fake_ultralytics.YOLOWorld = _StubYOLOWorld
-sys.modules["ultralytics"] = _fake_ultralytics
+_install_fakes()
 
 import app as app_module  # noqa: E402
 
@@ -53,7 +81,6 @@ class HealthEndpointTests(unittest.TestCase):
 class AnalyzeEndpointTests(unittest.TestCase):
     def setUp(self):
         self.client = app_module.app.test_client()
-        # Remember the real detect so we can restore it after each test.
         self._original_detect = app_module.detect
 
     def tearDown(self):
@@ -69,7 +96,6 @@ class AnalyzeEndpointTests(unittest.TestCase):
         self.assertIn("error", response.get_json())
 
     def test_empty_filename_returns_400(self):
-        # An "image" part with a blank filename should be rejected.
         data = {"image": (io.BytesIO(b""), "")}
         response = self.client.post(
             "/analyze", data=data, content_type="multipart/form-data"
@@ -99,6 +125,17 @@ class AnalyzeEndpointTests(unittest.TestCase):
         self.assertEqual(len(body["detections"]), 1)
         self.assertEqual(body["detections"][0]["cocoLabel"], "door")
         self.assertEqual(body["altTextSuggestion"], "Detected: door.")
+
+    def test_valid_upload_with_no_detections(self):
+        self._stub_detect([])
+        data = {"image": (io.BytesIO(b"bytes"), "empty.jpg")}
+        response = self.client.post(
+            "/analyze", data=data, content_type="multipart/form-data"
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["detections"], [])
+        self.assertEqual(body["altTextSuggestion"], "No accessibility features detected.")
 
 
 class BuildAltTextTests(unittest.TestCase):

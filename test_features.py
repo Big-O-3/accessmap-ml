@@ -1,25 +1,25 @@
 """
-test_features.py — unit tests for the prompt -> feature mapping.
+test_features.py — unit tests for the label -> feature mapping.
 
 These are pure-logic tests: no model, no network, no files. Run them with:
 
     source venv/bin/activate
-    python -m unittest test_features
+    pytest test_features.py
 
-features.py is the "dictionary" that connects the model's prompts to the
-frontend feature keys, so the most valuable thing to guard is that the two
-tables (PROMPTS and FEATURE_MAP) stay in sync — the module's own docstring
-warns that a mismatch silently shows a raw key in the UI.
+features.py is the "dictionary" that connects the model's detected labels to the
+frontend feature keys. We use Grounding DINO, which returns free-form labels
+(e.g. "a handrail", "stairs steps"), so to_feature() matches by keyword. The
+most valuable things to guard are that known labels resolve and unknown ones
+are skipped.
 """
 
 import unittest
 
-from features import FEATURE_MAP, PROMPTS, to_feature
+from features import KEYWORD_MAP, PROMPT_TEXT, to_feature
 
-# The feature keys the frontend knows how to render (from the comment in
-# features.py, which mirrors accessmap-frontend-/src/lib/features.js). If a
-# mapped value isn't in here, the frontend would show the raw key instead of a
-# friendly label — so we assert against this allow-list.
+# The feature keys the frontend knows how to render (mirrors
+# accessmap-frontend-/src/lib/features.js). A mapped value outside this set
+# would show a raw key in the UI, so we assert against this allow-list.
 KNOWN_FRONTEND_KEYS = {
     "entrance_detected",
     "restroom_available",
@@ -31,52 +31,58 @@ KNOWN_FRONTEND_KEYS = {
 
 
 class ToFeatureTests(unittest.TestCase):
-    def test_maps_each_known_prompt_to_its_feature(self):
-        # Every prompt in FEATURE_MAP should resolve to its mapped value.
-        for prompt, expected in FEATURE_MAP.items():
-            with self.subTest(prompt=prompt):
-                self.assertEqual(to_feature(prompt), expected)
-
     def test_specific_mappings(self):
-        # A few explicit spot-checks so the intent is documented, not just
-        # derived from the table itself.
+        # Explicit spot-checks so the intent is documented.
         self.assertEqual(to_feature("door"), "entrance_detected")
         self.assertEqual(to_feature("wheelchair ramp"), "entrance_detected")
         self.assertEqual(to_feature("stairs"), "stairs_present")
         self.assertEqual(to_feature("chair"), "seating_available")
         self.assertEqual(to_feature("toilet"), "restroom_available")
 
-    def test_unknown_prompt_returns_none(self):
+    def test_matches_multiword_and_partial_labels(self):
+        # Grounding DINO returns labels like these; keyword matching must still
+        # resolve them.
+        self.assertEqual(to_feature("a handrail"), "stairs_present")
+        self.assertEqual(to_feature("stairs steps"), "stairs_present")
+        self.assertEqual(to_feature("ramp ramp"), "entrance_detected")
+
+    def test_matching_is_case_insensitive(self):
+        # to_feature lowercases the label, so casing shouldn't matter.
+        self.assertEqual(to_feature("DOOR"), "entrance_detected")
+        self.assertEqual(to_feature("Chair"), "seating_available")
+
+    def test_unknown_label_returns_none(self):
         # An unmapped label must return None so detect() can skip it.
         self.assertIsNone(to_feature("dog"))
         self.assertIsNone(to_feature(""))
-        self.assertIsNone(to_feature("DOOR"))  # lookup is case-sensitive
+        self.assertIsNone(to_feature("banana"))
 
 
 class TableConsistencyTests(unittest.TestCase):
-    def test_every_prompt_is_mapped(self):
-        # The docstring in features.py says each PROMPT must appear in
-        # FEATURE_MAP. A missing entry means the model looks for something the
-        # frontend can never display.
-        for prompt in PROMPTS:
-            with self.subTest(prompt=prompt):
-                self.assertIn(prompt, FEATURE_MAP)
-                self.assertIsNotNone(to_feature(prompt))
-
-    def test_no_orphan_map_entries(self):
-        # The reverse guard: every mapped prompt should be something we
-        # actually ask the model to look for. An orphan entry is dead weight.
-        for prompt in FEATURE_MAP:
-            with self.subTest(prompt=prompt):
-                self.assertIn(prompt, PROMPTS)
-
     def test_all_features_are_known_frontend_keys(self):
-        for prompt, feature in FEATURE_MAP.items():
-            with self.subTest(prompt=prompt):
+        # Every mapped feature must be something the frontend can render.
+        for keyword, feature in KEYWORD_MAP:
+            with self.subTest(keyword=keyword):
                 self.assertIn(feature, KNOWN_FRONTEND_KEYS)
 
-    def test_no_duplicate_prompts(self):
-        self.assertEqual(len(PROMPTS), len(set(PROMPTS)))
+    def test_every_keyword_appears_in_the_prompt(self):
+        # A keyword we map but never ask the model to look for is dead weight.
+        # (Compound labels like "staircase" contain "stairs"; we check the
+        # keyword's presence as a substring of the prompt text.)
+        prompt = PROMPT_TEXT.lower()
+        for keyword, _feature in KEYWORD_MAP:
+            with self.subTest(keyword=keyword):
+                self.assertIn(keyword, prompt)
+
+    def test_stairs_and_handrail_flag_barrier(self):
+        # Stairs/steps/handrails should map to the barrier feature, since they
+        # signal an accessibility obstacle.
+        self.assertEqual(to_feature("steps"), "stairs_present")
+        self.assertEqual(to_feature("handrail"), "stairs_present")
+
+    def test_prompt_text_is_period_separated(self):
+        # Grounding DINO expects concepts separated by periods.
+        self.assertIn(".", PROMPT_TEXT)
 
 
 if __name__ == "__main__":
