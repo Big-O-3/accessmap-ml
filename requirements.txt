@@ -1,3 +1,4 @@
 ultralytics
 flask
+flask-cors
 pillow

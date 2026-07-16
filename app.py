@@ -14,10 +14,16 @@ Then in another terminal:
 import os
 
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 from detector import detect
 
 app = Flask(__name__)
+
+# Allow browser-based frontends (the React app) to call this service directly.
+# Open to all origins since this is a local dev / detection service with no
+# sensitive data; tighten to specific origins if deployed.
+CORS(app)
 
 # Where uploaded photos are temporarily saved before analysis. Ignored by git.
 UPLOAD_DIR = "uploads"
