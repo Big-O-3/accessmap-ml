@@ -1,29 +1,30 @@
 """
-tune.py — a measurement harness for tuning YOLO-World prompts and threshold.
+tune.py — a measurement harness for tuning Grounding DINO prompts and thresholds.
 
 Detection tuning is empirical: you change the prompt phrasing or confidence
-floor, then SEE what actually gets detected on a fixed set of images. Guessing
-doesn't work; measuring does.
+thresholds, then SEE what actually gets detected on a fixed set of images.
+Guessing doesn't work; measuring does.
 
 Usage:
     python tune.py            # run the candidate config below on all test images
     python tune.py --download # (re)download the test image set into tune_images/
 
-Edit CANDIDATE_PROMPTS and CANDIDATE_CONF below, re-run, and compare the tables.
-When a config looks good, copy the winning prompts into features.py and the
-threshold into detector.py.
+Edit CANDIDATE_PROMPT and the thresholds below, re-run, and compare the tables.
+When a config looks good, copy the winning prompt into features.py (PROMPT_TEXT)
+and the thresholds into detector.py (MIN_CONFIDENCE / TEXT_THRESHOLD).
 """
 
 import os
 import sys
 import urllib.request
 
-from ultralytics import YOLOWorld
+import torch
+from PIL import Image
+from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
 # --- The fixed test set --------------------------------------------------------
-# A handful of realistic venue photos, each labeled with what a human sees so we
-# can judge whether detection is finding the right things. Add your own venue
-# photos to tune_images/ to test against real data.
+# A handful of realistic venue photos. Add your own venue photos to tune_images/
+# to test against real data.
 TEST_IMAGES = {
     "ramp_entrance.jpg": "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&q=70",
     "storefront_door.jpg": "https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=800&q=70",
@@ -33,25 +34,19 @@ TEST_IMAGES = {
 }
 
 IMAGE_DIR = "tune_images"
+MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 
 # --- The candidate config to test ---------------------------------------------
-# Edit these two, re-run, and compare. This is the whole tuning loop.
-CANDIDATE_PROMPTS = [
-    "wheelchair ramp",
-    "ramp",
-    "door",
-    "glass door",
-    "stairs",
-    "steps",
-    "handrail",
-    "accessible parking sign",
-    "chair",
-    "bench",
-    "table",
-    "toilet",
-]
+# Edit these, re-run, and compare. This is the whole tuning loop.
+# Grounding DINO expects concepts separated by periods, lowercase.
+CANDIDATE_PROMPT = (
+    "wheelchair ramp. ramp. door. entrance. "
+    "stairs. steps. staircase. handrail. "
+    "chair. bench. table. toilet. sink."
+)
 
-CANDIDATE_CONF = 0.05  # low floor so we can SEE everything, then decide where to cut
+CANDIDATE_BOX_THRESHOLD = 0.30   # minimum box confidence
+CANDIDATE_TEXT_THRESHOLD = 0.30  # minimum text-match strength
 
 
 def download_images():
@@ -71,27 +66,35 @@ def run():
         print("No test images yet — run: python tune.py --download")
         return
 
-    model = YOLOWorld("yolov8s-world.pt")
-    model.set_classes(CANDIDATE_PROMPTS)
+    processor = AutoProcessor.from_pretrained(MODEL_ID)
+    model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID)
 
-    print(f"\nPrompts ({len(CANDIDATE_PROMPTS)}): {CANDIDATE_PROMPTS}")
-    print(f"Confidence floor: {CANDIDATE_CONF}\n")
-    print(f"{'image':<26}{'detections (prompt @ conf)'}")
+    print(f"\nPrompt: {CANDIDATE_PROMPT}")
+    print(f"box_threshold={CANDIDATE_BOX_THRESHOLD}, text_threshold={CANDIDATE_TEXT_THRESHOLD}\n")
+    print(f"{'image':<26}{'detections (label @ conf)'}")
     print("-" * 80)
 
-    images = sorted(os.listdir(IMAGE_DIR))
-    for name in images:
-        path = os.path.join(IMAGE_DIR, name)
-        result = model.predict(path, conf=CANDIDATE_CONF, verbose=False)[0]
-        hits = []
-        for box in result.boxes:
-            label = result.names[int(box.cls)]
-            hits.append(f"{label}@{float(box.conf):.2f}")
-        # Sort by confidence (highest first) for readability.
-        hits.sort(key=lambda s: float(s.split("@")[1]), reverse=True)
+    for name in sorted(os.listdir(IMAGE_DIR)):
+        image = Image.open(os.path.join(IMAGE_DIR, name)).convert("RGB")
+        inputs = processor(images=image, text=CANDIDATE_PROMPT, return_tensors="pt")
+        with torch.no_grad():
+            outputs = model(**inputs)
+        result = processor.post_process_grounded_object_detection(
+            outputs,
+            inputs["input_ids"],
+            threshold=CANDIDATE_BOX_THRESHOLD,
+            text_threshold=CANDIDATE_TEXT_THRESHOLD,
+            target_sizes=[image.size[::-1]],
+        )[0]
+
+        hits = sorted(
+            (f"{lbl}@{float(s):.2f}" for lbl, s in zip(result["labels"], result["scores"])),
+            key=lambda s: float(s.split("@")[1]),
+            reverse=True,
+        )
         print(f"{name:<26}{', '.join(hits) if hits else 'NONE'}")
     print("-" * 80)
-    print("Tip: look for the confidence where real features appear but junk doesn't.")
+    print("Tip: find thresholds where real features appear but noise/duplicates don't.")
 
 
 if __name__ == "__main__":
