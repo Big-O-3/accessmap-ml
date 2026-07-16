@@ -11,3 +11,6 @@ weights/
 
 # Uploaded / temporary images
 uploads/
+
+# Downloaded tuning test images (regenerate with: python tune.py --download)
+tune_images/
