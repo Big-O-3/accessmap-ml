@@ -1,4 +1,8 @@
-ultralytics
+torch
+transformers
 flask
 flask-cors
 pillow
+
+# Testing
+pytest

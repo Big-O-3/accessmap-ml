@@ -1,73 +1,86 @@
 """
-detector.py — the actual AI. Loads YOLO-World once and runs it on a photo.
+detector.py — the actual AI. Loads Grounding DINO once and runs it on a photo.
+
+We use Grounding DINO (an open-vocabulary detector) instead of YOLO-World
+because YOLO-World has a blind spot for architectural accessibility features —
+it could not detect ramps, stairs, or doors at any confidence, while Grounding
+DINO reliably surfaces them.
 
 Kept separate from the web server (app.py) so you can test the model on its own:
 
     python -c "from detector import detect; import json; print(json.dumps(detect('samples/test.jpg'), indent=2))"
 
-The output is shaped to match exactly what the React frontend expects (see
-accessmap-frontend-/src/components/DetectionImage.jsx):
+The output shape is unchanged from before (the frontend + Node backend depend
+on it):
 
     {
-      "cocoLabel": "door",                 # the prompt that matched
-      "accessibilityFeature": "entrance_detected",
-      "confidence": 0.94,                  # 0.0 - 1.0
+      "cocoLabel": "a handrail",            # the phrase Grounding DINO matched
+      "accessibilityFeature": "stairs_present",
+      "confidence": 0.51,                   # 0.0 - 1.0
+      "highConfidence": false,
       "boundingBox": {"x": 120, "y": 180, "width": 160, "height": 260}
     }
 """
 
-from ultralytics import YOLOWorld
+import torch
+from PIL import Image
+from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
-from features import PROMPTS, to_feature
+from features import PROMPT_TEXT, to_feature
 
-# Load the model ONCE when this file is first imported. Loading is slow, so we
-# do NOT want to reload it on every request. The first run auto-downloads the
-# weights file (yolov8s-world.pt, ~tens of MB) and caches it locally.
-_model = YOLOWorld("yolov8s-world.pt")
+# The Grounding DINO checkpoint. "tiny" is the fastest; it already detects our
+# accessibility features well. Downloads (~700MB) and caches on first run.
+_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 
-# Tell the open-vocabulary model which phrases to look for.
-_model.set_classes(PROMPTS)
+# What we record as the model version on each analysis (surfaced to the DB).
+MODEL_VERSION = "grounding-dino-tiny"
 
-# Minimum confidence for a detection to be returned at all. Open-vocabulary
-# models like YOLO-World tend to score lower than fixed-class models, and
-# ultralytics defaults to 0.25 (which drops most of our accessibility
-# detections). We use a lower floor so borderline features still surface; the
-# frontend decides how to treat low- vs. high-confidence ones (see the
-# highConfidence flag added later).
-MIN_CONFIDENCE = 0.10
+# Load the processor + model ONCE at import time (loading is slow).
+_processor = AutoProcessor.from_pretrained(_MODEL_ID)
+_model = AutoModelForZeroShotObjectDetection.from_pretrained(_MODEL_ID)
+
+# Minimum box confidence to return a detection. Tuned to 0.30: real features
+# (ramps, handrails, stairs, seating) survive while borderline noise is cut.
+MIN_CONFIDENCE = 0.30
+
+# Text-match threshold — how strongly a box must match the prompt phrase. 0.30
+# reduces duplicate/garbled labels like "ramp ramp".
+TEXT_THRESHOLD = 0.30
 
 # At or above this confidence, a detection is treated as "high confidence" and
-# the frontend pre-checks it for the contributor. Lower-confidence detections
-# are still shown, just not pre-checked (per the project plan's trust rule).
-HIGH_CONFIDENCE = 0.85
+# the frontend pre-checks it for the contributor.
+HIGH_CONFIDENCE = 0.5
 
 
 def detect(image_path):
-    """Run YOLO-World on an image and return a list of detection dicts.
+    """Run Grounding DINO on an image and return a list of detection dicts.
 
-    Each dict is shaped for the frontend. Detections whose prompt has no
-    mapped accessibility feature are skipped, so the frontend only receives
-    keys it knows how to display.
+    Each dict is shaped for the frontend. Detections whose label has no mapped
+    accessibility feature are skipped.
     """
-    # predict() returns a list of Results (one per image). We pass one image,
-    # so we take results[0]. verbose=False keeps the console quiet.
-    results = _model.predict(image_path, conf=MIN_CONFIDENCE, verbose=False)
-    result = results[0]
+    image = Image.open(image_path).convert("RGB")
+
+    inputs = _processor(images=image, text=PROMPT_TEXT, return_tensors="pt")
+    with torch.no_grad():
+        outputs = _model(**inputs)
+
+    # post_process returns boxes in (x1, y1, x2, y2) pixel coords, plus the
+    # matched label text and a score, for the original image size.
+    results = _processor.post_process_grounded_object_detection(
+        outputs,
+        inputs["input_ids"],
+        threshold=MIN_CONFIDENCE,
+        text_threshold=TEXT_THRESHOLD,
+        target_sizes=[image.size[::-1]],  # (height, width)
+    )[0]
 
     detections = []
-    for box in result.boxes:
-        # box.cls is the index into PROMPTS; look up the human-readable prompt.
-        class_index = int(box.cls)
-        prompt = result.names[class_index]
-
-        feature = to_feature(prompt)
+    for box, label, score in zip(results["boxes"], results["labels"], results["scores"]):
+        feature = to_feature(label)
         if feature is None:
-            # We don't have a frontend feature for this label — skip it.
             continue
 
-        # box.xyxy is [x1, y1, x2, y2] in original image pixels. The frontend
-        # wants {x, y, width, height}, so convert.
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        x1, y1, x2, y2 = box.tolist()
         bounding_box = {
             "x": round(x1),
             "y": round(y1),
@@ -75,10 +88,10 @@ def detect(image_path):
             "height": round(y2 - y1),
         }
 
-        confidence = round(float(box.conf), 2)
+        confidence = round(float(score), 2)
         detections.append(
             {
-                "cocoLabel": prompt,
+                "cocoLabel": label,
                 "accessibilityFeature": feature,
                 "confidence": confidence,
                 "highConfidence": confidence >= HIGH_CONFIDENCE,
