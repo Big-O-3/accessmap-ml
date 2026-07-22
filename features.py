@@ -27,7 +27,18 @@ PROMPT_TEXT = (
     "stairs. steps. staircase. "
     "handrail. "
     "chair. bench. table. "
-    "toilet. sink."
+    "toilet. sink. "
+    # Venue-gate cues: not mapped to a feature, used by detector.is_venue()
+    # to decide whether the photo looks like a venue at all.
+    "building. storefront. sign. window."
+)
+
+# Keywords that indicate the photo shows a venue (building/entrance context).
+# Any detection whose label contains one of these — at MIN_CONFIDENCE or
+# above — is enough to consider the shot venue-like.
+VENUE_KEYWORDS = (
+    "building", "storefront", "sign", "window",
+    "door", "entrance", "ramp",
 )
 
 # Maps a keyword (searched inside a returned label) -> frontend feature key.
