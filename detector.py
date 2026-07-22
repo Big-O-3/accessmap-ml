@@ -173,3 +173,22 @@ def framing_hint(detections, image_size):
     if area_ratio < 0.03:
         return "Step closer — the entrance is very small in the frame."
     return None
+
+
+def analyze(image_path):
+    """Run the model once and return detections plus framing metadata.
+
+    Response shape:
+      {
+        "detections":  [...],       # same as detect()
+        "isVenue":     bool,        # False -> the photo doesn't look like a venue
+        "framingHint": str | None,  # short suggestion, or None if framing is fine
+      }
+    """
+    results, size = _run_model(image_path)
+    detections = _shape_detections(results)
+    return {
+        "detections": detections,
+        "isVenue": is_venue(results),
+        "framingHint": framing_hint(detections, size),
+    }
