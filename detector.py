@@ -137,3 +137,39 @@ def is_venue(results):
             if kw in text:
                 return True
     return False
+
+
+def framing_hint(detections, image_size):
+    """Suggest how to reframe if the entrance is poorly positioned.
+
+    Uses whichever entrance-like detection is largest. Returns None when
+    there's nothing to base a hint on (no entrance detected) or the framing
+    is already fine.
+    """
+    width, height = image_size
+    frame_area = max(1, width * height)
+
+    entrance_boxes = [
+        d["boundingBox"]
+        for d in detections
+        if d["accessibilityFeature"] == "entrance_detected"
+    ]
+    if not entrance_boxes:
+        return None
+
+    box = max(entrance_boxes, key=lambda b: b["width"] * b["height"])
+    area_ratio = (box["width"] * box["height"]) / frame_area
+
+    # Cropped-off entrance: any edge of the box coincides with the image edge.
+    touches_left = box["x"] <= 0
+    touches_top = box["y"] <= 0
+    touches_right = box["x"] + box["width"] >= width
+    touches_bottom = box["y"] + box["height"] >= height
+    if touches_left or touches_top or touches_right or touches_bottom:
+        return "Move back or recenter — the entrance is cut off at the edge of the frame."
+
+    if area_ratio > 0.6:
+        return "Step back — the entrance fills most of the frame."
+    if area_ratio < 0.03:
+        return "Step closer — the entrance is very small in the frame."
+    return None
