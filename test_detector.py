@@ -182,5 +182,70 @@ class DetectTests(unittest.TestCase):
         )
 
 
+# The fake PIL image reports size (800, 600), so the framing math assumes a
+# frame area of 480000 pixels.
+class AnalyzeTests(unittest.TestCase):
+    def tearDown(self):
+        set_result([], [], [])
+
+    def test_returns_expected_shape(self):
+        set_result([], [], [])
+        result = detector.analyze("img.jpg")
+        self.assertEqual(set(result.keys()), {"detections", "isVenue", "framingHint"})
+
+    def test_is_venue_true_when_storefront_detected(self):
+        set_result([[0, 0, 5, 5]], ["a storefront"], [0.55])
+        result = detector.analyze("img.jpg")
+        # Storefront isn't feature-mapped, so no detection — but is_venue passes.
+        self.assertEqual(result["detections"], [])
+        self.assertTrue(result["isVenue"])
+
+    def test_is_venue_true_when_door_detected(self):
+        set_result([[10, 10, 40, 40]], ["door"], [0.7])
+        self.assertTrue(detector.analyze("img.jpg")["isVenue"])
+
+    def test_is_venue_false_when_nothing_venue_like(self):
+        # Chair alone doesn't say "venue"; could be anyone's living room.
+        set_result([[0, 0, 5, 5]], ["chair"], [0.6])
+        self.assertFalse(detector.analyze("img.jpg")["isVenue"])
+
+    def test_is_venue_ignores_low_confidence_labels(self):
+        # A borderline building match under MIN_CONFIDENCE shouldn't gate-pass.
+        set_result([[0, 0, 5, 5]], ["building"], [detector.MIN_CONFIDENCE - 0.05])
+        self.assertFalse(detector.analyze("img.jpg")["isVenue"])
+
+    def test_framing_hint_step_back_when_entrance_fills_frame(self):
+        # Entrance covers >60% of the 800x600 frame (600*500 = 300000 > 288000)
+        # but doesn't touch any edge.
+        set_result([[100, 50, 700, 550]], ["door"], [0.9])
+        hint = detector.analyze("img.jpg")["framingHint"]
+        self.assertIsNotNone(hint)
+        self.assertIn("Step back", hint)
+
+    def test_framing_hint_step_closer_when_entrance_is_tiny(self):
+        # A tiny 40x40 entrance box in an 800x600 frame -> area ratio ~0.003.
+        set_result([[100, 100, 140, 140]], ["door"], [0.9])
+        hint = detector.analyze("img.jpg")["framingHint"]
+        self.assertIsNotNone(hint)
+        self.assertIn("Step closer", hint)
+
+    def test_framing_hint_recenter_when_entrance_touches_edge(self):
+        # Entrance touches the left edge (x1 == 0).
+        set_result([[0, 100, 200, 400]], ["door"], [0.9])
+        hint = detector.analyze("img.jpg")["framingHint"]
+        self.assertIsNotNone(hint)
+        self.assertIn("cut off", hint)
+
+    def test_framing_hint_none_when_well_framed(self):
+        # 200x300 door centered in an 800x600 frame -> 12.5% area, no edges.
+        set_result([[300, 150, 500, 450]], ["door"], [0.9])
+        self.assertIsNone(detector.analyze("img.jpg")["framingHint"])
+
+    def test_framing_hint_none_without_entrance(self):
+        # Only a chair — no entrance means no basis for a hint.
+        set_result([[0, 0, 10, 10]], ["chair"], [0.6])
+        self.assertIsNone(detector.analyze("img.jpg")["framingHint"])
+
+
 if __name__ == "__main__":
     unittest.main()
