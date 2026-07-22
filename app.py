@@ -16,7 +16,7 @@ import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from detector import detect
+from detector import analyze
 
 app = Flask(__name__)
 
@@ -55,11 +55,14 @@ def analyze():
     save_path = os.path.join(UPLOAD_DIR, image.filename)
     image.save(save_path)
 
-    detections = detect(save_path)
+    result = analyze(save_path)
+    detections = result["detections"]
     return jsonify(
         {
             "detections": detections,
             "altTextSuggestion": build_alt_text(detections),
+            "isVenue": result["isVenue"],
+            "framingHint": result["framingHint"],
         }
     )
 
