@@ -26,7 +26,7 @@ import torch
 from PIL import Image
 from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
-from features import PROMPT_TEXT, to_feature
+from features import PROMPT_TEXT, VENUE_KEYWORDS, to_feature
 
 # The Grounding DINO checkpoint. "tiny" is the fastest; it already detects our
 # accessibility features well. Downloads (~700MB) and caches on first run.
@@ -119,3 +119,21 @@ def detect(image_path):
     """
     results, _size = _run_model(image_path)
     return _shape_detections(results)
+
+
+def is_venue(results):
+    """Decide whether the photo looks like a venue at all.
+
+    A shot passes the gate if ANY raw detection (feature-mapped or not)
+    matches a venue keyword above MIN_CONFIDENCE. This uses the raw results
+    rather than the shaped detections list so unmapped labels like "building"
+    or "storefront" still count.
+    """
+    for label, score in zip(results["labels"], results["scores"]):
+        text = label.lower()
+        if float(score) < MIN_CONFIDENCE:
+            continue
+        for kw in VENUE_KEYWORDS:
+            if kw in text:
+                return True
+    return False
