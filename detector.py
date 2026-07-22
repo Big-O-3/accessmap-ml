@@ -52,11 +52,10 @@ TEXT_THRESHOLD = 0.30
 HIGH_CONFIDENCE = 0.5
 
 
-def detect(image_path):
-    """Run Grounding DINO on an image and return a list of detection dicts.
+def _run_model(image_path):
+    """Load an image, run Grounding DINO, return (results, image_size).
 
-    Each dict is shaped for the frontend. Detections whose label has no mapped
-    accessibility feature are skipped.
+    image_size is (width, height) in pixels — used by framing logic.
     """
     image = Image.open(image_path).convert("RGB")
 
@@ -74,6 +73,16 @@ def detect(image_path):
         target_sizes=[image.size[::-1]],  # (height, width)
     )[0]
 
+    return results, image.size
+
+
+def _shape_detections(results):
+    """Turn raw model results into the frontend detection list.
+
+    Skips detections whose label has no mapped accessibility feature — those
+    include the venue-gate keywords (building, storefront, sign, window), which
+    are read separately by is_venue().
+    """
     detections = []
     for box, label, score in zip(results["boxes"], results["labels"], results["scores"]):
         feature = to_feature(label)
@@ -100,3 +109,13 @@ def detect(image_path):
         )
 
     return detections
+
+
+def detect(image_path):
+    """Run Grounding DINO on an image and return a list of detection dicts.
+
+    Kept for backward compatibility (test_detect.py, direct callers). New
+    callers should use analyze() to also get the venue gate + framing hint.
+    """
+    results, _size = _run_model(image_path)
+    return _shape_detections(results)
