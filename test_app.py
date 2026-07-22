@@ -81,14 +81,18 @@ class HealthEndpointTests(unittest.TestCase):
 class AnalyzeEndpointTests(unittest.TestCase):
     def setUp(self):
         self.client = app_module.app.test_client()
-        self._original_detect = app_module.detect
+        self._original_analyze = app_module.analyze
 
     def tearDown(self):
-        app_module.detect = self._original_detect
+        app_module.analyze = self._original_analyze
 
-    def _stub_detect(self, detections):
-        """Point app.detect at a canned result, ignoring the saved file."""
-        app_module.detect = lambda _path: detections
+    def _stub_detect(self, detections, is_venue=True, framing_hint=None):
+        """Point app.analyze at a canned result, ignoring the saved file."""
+        app_module.analyze = lambda _path: {
+            "detections": detections,
+            "isVenue": is_venue,
+            "framingHint": framing_hint,
+        }
 
     def test_missing_image_field_returns_400(self):
         response = self.client.post("/analyze", data={})
@@ -136,6 +140,38 @@ class AnalyzeEndpointTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(body["detections"], [])
         self.assertEqual(body["altTextSuggestion"], "No accessibility features detected.")
+
+    def test_response_surfaces_is_venue_and_framing_hint(self):
+        self._stub_detect(
+            [
+                {
+                    "cocoLabel": "door",
+                    "accessibilityFeature": "entrance_detected",
+                    "confidence": 0.94,
+                    "highConfidence": True,
+                    "boundingBox": {"x": 1, "y": 2, "width": 3, "height": 4},
+                }
+            ],
+            is_venue=True,
+            framing_hint="Step closer — the entrance is very small in the frame.",
+        )
+        data = {"image": (io.BytesIO(b"bytes"), "photo.jpg")}
+        response = self.client.post(
+            "/analyze", data=data, content_type="multipart/form-data"
+        )
+        body = response.get_json()
+        self.assertTrue(body["isVenue"])
+        self.assertIn("Step closer", body["framingHint"])
+
+    def test_response_when_photo_is_not_a_venue(self):
+        self._stub_detect([], is_venue=False, framing_hint=None)
+        data = {"image": (io.BytesIO(b"bytes"), "selfie.jpg")}
+        response = self.client.post(
+            "/analyze", data=data, content_type="multipart/form-data"
+        )
+        body = response.get_json()
+        self.assertFalse(body["isVenue"])
+        self.assertIsNone(body["framingHint"])
 
 
 class BuildAltTextTests(unittest.TestCase):
