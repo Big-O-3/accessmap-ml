@@ -1,12 +1,10 @@
 """
 test_app.py — tests for the Flask endpoints in app.py.
 
-app.py imports detector, which loads the real Grounding DINO model at import
-time. To keep these HTTP-layer tests fast, we install fake `torch`,
-`transformers`, and `PIL` modules before importing app (same approach as
-test_detector.py) so no weights are downloaded. We then monkeypatch
-app.detect to control exactly what "detections" the endpoint sees, and assert
-on status codes and JSON.
+app.py imports detector, which calls Hugging Face's Inference API in
+production. To keep these HTTP-layer tests fast and offline, we monkeypatch
+app_module.run_analyze with a canned response — that's the single seam
+between the route and the model.
 
 Run:
     source venv/bin/activate
@@ -14,58 +12,10 @@ Run:
 """
 
 import io
-import sys
-import types
 import unittest
 
-
-def _install_fakes():
-    """Stub the heavy ML deps so importing app -> detector is instant."""
-    fake_torch = types.ModuleType("torch")
-
-    class _NoGrad:
-        def __enter__(self):
-            return None
-
-        def __exit__(self, *a):
-            return False
-
-    fake_torch.no_grad = lambda: _NoGrad()
-    sys.modules["torch"] = fake_torch
-
-    fake_tf = types.ModuleType("transformers")
-
-    class _Stub:
-        def __call__(self, *a, **k):
-            return {"input_ids": [[0]]}
-
-        def post_process_grounded_object_detection(self, *a, **k):
-            return [{"boxes": [], "labels": [], "scores": []}]
-
-    fake_tf.AutoProcessor = types.SimpleNamespace(from_pretrained=lambda *a, **k: _Stub())
-    fake_tf.AutoModelForZeroShotObjectDetection = types.SimpleNamespace(
-        from_pretrained=lambda *a, **k: _Stub()
-    )
-    sys.modules["transformers"] = fake_tf
-
-    fake_pil = types.ModuleType("PIL")
-    fake_image_mod = types.ModuleType("PIL.Image")
-
-    class _Img:
-        size = (800, 600)
-
-        def convert(self, _mode):
-            return self
-
-    fake_image_mod.open = lambda _path: _Img()
-    fake_pil.Image = fake_image_mod
-    sys.modules["PIL"] = fake_pil
-    sys.modules["PIL.Image"] = fake_image_mod
-
-
-_install_fakes()
-
-import app as app_module  # noqa: E402
+import app as app_module
+from detector import ModelUnavailableError
 
 
 class HealthEndpointTests(unittest.TestCase):
@@ -81,14 +31,14 @@ class HealthEndpointTests(unittest.TestCase):
 class AnalyzeEndpointTests(unittest.TestCase):
     def setUp(self):
         self.client = app_module.app.test_client()
-        self._original_analyze = app_module.analyze
+        self._original = app_module.run_analyze
 
     def tearDown(self):
-        app_module.analyze = self._original_analyze
+        app_module.run_analyze = self._original
 
     def _stub_detect(self, detections, is_venue=True, framing_hint=None):
-        """Point app.analyze at a canned result, ignoring the saved file."""
-        app_module.analyze = lambda _path: {
+        """Point app.run_analyze at a canned result, ignoring the saved file."""
+        app_module.run_analyze = lambda _path: {
             "detections": detections,
             "isVenue": is_venue,
             "framingHint": framing_hint,
@@ -173,6 +123,17 @@ class AnalyzeEndpointTests(unittest.TestCase):
         self.assertFalse(body["isVenue"])
         self.assertIsNone(body["framingHint"])
 
+    def test_model_unavailable_returns_503(self):
+        def _raise(_path):
+            raise ModelUnavailableError("HF is warming up")
+        app_module.run_analyze = _raise
+        data = {"image": (io.BytesIO(b"bytes"), "photo.jpg")}
+        response = self.client.post(
+            "/analyze", data=data, content_type="multipart/form-data"
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("warming up", response.get_json()["error"])
+
 
 class BuildAltTextTests(unittest.TestCase):
     def test_empty_detections(self):
@@ -185,7 +146,7 @@ class BuildAltTextTests(unittest.TestCase):
         detections = [
             {"cocoLabel": "door"},
             {"cocoLabel": "chair"},
-            {"cocoLabel": "door"},  # duplicate should not repeat
+            {"cocoLabel": "door"},
         ]
         self.assertEqual(
             app_module.build_alt_text(detections),
