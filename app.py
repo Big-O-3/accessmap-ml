@@ -21,9 +21,9 @@ from detector import analyze as run_analyze
 app = Flask(__name__)
 
 # Allow browser-based frontends (the React app) to call this service directly.
-# Open to all origins since this is a local dev / detection service with no
-# sensitive data; tighten to specific origins if deployed.
-CORS(app)
+# In production the backend proxies to /analyze, so we restrict CORS to the
+# origin listed in the CORS_ORIGIN env var; locally it defaults to "*".
+CORS(app, origins=[os.environ.get("CORS_ORIGIN", "*")])
 
 # Where uploaded photos are temporarily saved before analysis. Ignored by git.
 UPLOAD_DIR = "uploads"
@@ -85,5 +85,8 @@ def build_alt_text(detections):
 
 
 if __name__ == "__main__":
-    # Port 5001 avoids clashing with the Node backend (commonly on 3000/5000).
-    app.run(port=5001, debug=True)
+    # Read PORT from the env so hosts like Hugging Face Spaces (which set
+    # PORT=7860) can bind correctly. Falls back to 5001 for local dev.
+    port = int(os.environ.get("PORT", 5001))
+    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host="0.0.0.0", port=port, debug=debug)
