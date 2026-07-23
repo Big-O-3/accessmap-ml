@@ -1,13 +1,18 @@
 """
-detector.py — the actual AI. Loads Grounding DINO once and runs it on a photo.
+detector.py — the accessibility feature detector.
 
-Grounding DINO is an open-vocabulary detector: we hand it a plain-English prompt
-listing the accessibility features we care about (ramps, doors, stairs, seating,
-etc.) and it returns boxes matched to those phrases.
+We use Grounding DINO, an open-vocabulary object detector, and hand it a plain-
+English prompt listing what we care about (ramps, doors, stairs, seating…). It
+returns boxes matched to the prompt phrases.
+
+In production we call it through Hugging Face's Serverless Inference API rather
+than downloading the model — this keeps the deploy image ~50 MB instead of
+~2 GB and works on any free-tier host. Requires the HF_API_TOKEN env var.
 
 Kept separate from the web server (app.py) so you can test the model on its own:
 
-    python -c "from detector import detect; import json; print(json.dumps(detect('samples/test.jpg'), indent=2))"
+    HF_API_TOKEN=hf_xxx python -c "from detector import analyze; \
+        import json; print(json.dumps(analyze('samples/test.jpg'), indent=2))"
 
 Output shape (the frontend + Node backend depend on it):
 
@@ -24,74 +29,107 @@ labels aren't COCO classes, but the field is baked into the Prisma schema and
 frontend, so it's kept as-is.
 """
 
-import torch
+import os
+
+import requests
 from PIL import Image
-from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
 from features import PROMPT_TEXT, VENUE_KEYWORDS, to_feature
 
-# The Grounding DINO checkpoint. "tiny" is the fastest; it already detects our
-# accessibility features well. Downloads (~700MB) and caches on first run.
+# Grounding DINO "tiny" — the fastest checkpoint, already detects the features
+# we care about well. Called via HF's Serverless Inference API.
 _MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+_HF_URL = f"https://api-inference.huggingface.co/models/{_MODEL_ID}"
 
 # What we record as the model version on each analysis (surfaced to the DB).
 MODEL_VERSION = "grounding-dino-tiny"
 
-# Load the processor + model ONCE at import time (loading is slow).
-_processor = AutoProcessor.from_pretrained(_MODEL_ID)
-_model = AutoModelForZeroShotObjectDetection.from_pretrained(_MODEL_ID)
-
-# Minimum box confidence to return a detection. Tuned to 0.30: real features
-# (ramps, handrails, stairs, seating) survive while borderline noise is cut.
+# Detection thresholds — matched to what post_process_grounded_object_detection
+# uses locally so scores stay comparable across the API + local paths.
 MIN_CONFIDENCE = 0.30
-
-# Text-match threshold — how strongly a box must match the prompt phrase. 0.30
-# reduces duplicate/garbled labels like "ramp ramp".
-TEXT_THRESHOLD = 0.30
-
-# At or above this confidence, a detection is treated as "high confidence" and
-# the frontend pre-checks it for the contributor.
 HIGH_CONFIDENCE = 0.5
 
+# Cold-start / retry knobs. HF's serverless models sleep after ~15 min of
+# inactivity; the first call after that returns 503 with a warm-up message. We
+# retry a few times so the frontend just sees a slow first request, not a fail.
+_TIMEOUT = 60           # seconds per HTTP call
+_MAX_RETRIES = 6        # ~90 seconds total worst case
+_RETRY_BACKOFF = 15     # seconds between retries when the model is warming
 
-def _run_model(image_path):
-    """Load an image, run Grounding DINO, return (results, image_size).
 
-    image_size is (width, height) in pixels — used by framing logic.
+class ModelUnavailableError(RuntimeError):
+    """Raised when the HF Inference API can't serve a detection."""
+
+
+def _hf_headers():
+    token = os.environ.get("HF_API_TOKEN")
+    if not token:
+        raise ModelUnavailableError(
+            "HF_API_TOKEN is not set — get a Read token from "
+            "https://huggingface.co/settings/tokens and add it to your env."
+        )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _post_image(image_bytes):
+    """POST raw image bytes to the HF Inference API, retrying cold-starts.
+
+    HF returns 200 with the detections list, 503 while the model warms
+    (retryable), or any other 4xx/5xx we surface as an error.
     """
-    image = Image.open(image_path).convert("RGB")
+    headers = _hf_headers()
+    # Grounding DINO takes both the image and the text prompt. HF's API accepts
+    # the prompt as an "inputs" text field on the same multipart body.
+    for attempt in range(_MAX_RETRIES):
+        response = requests.post(
+            _HF_URL,
+            headers=headers,
+            data=image_bytes,
+            params={"text": PROMPT_TEXT},
+            timeout=_TIMEOUT,
+        )
+        if response.status_code == 200:
+            return response.json()
+        # 503 while the model spins up. HF sometimes signals this via a JSON
+        # body with an "estimated_time" field.
+        if response.status_code == 503:
+            if attempt < _MAX_RETRIES - 1:
+                import time
+                time.sleep(_RETRY_BACKOFF)
+                continue
+        raise ModelUnavailableError(
+            f"HF Inference API returned {response.status_code}: {response.text[:200]}"
+        )
+    raise ModelUnavailableError("HF Inference API is still warming up. Try again.")
 
-    inputs = _processor(images=image, text=PROMPT_TEXT, return_tensors="pt")
-    with torch.no_grad():
-        outputs = _model(**inputs)
 
-    # post_process returns boxes in (x1, y1, x2, y2) pixel coords, plus the
-    # matched label text and a score, for the original image size.
-    results = _processor.post_process_grounded_object_detection(
-        outputs,
-        inputs["input_ids"],
-        threshold=MIN_CONFIDENCE,
-        text_threshold=TEXT_THRESHOLD,
-        target_sizes=[image.size[::-1]],  # (height, width)
-    )[0]
+def _shape_detections(raw_boxes):
+    """Turn raw HF detections into the frontend detection list.
 
-    return results, image.size
-
-
-def _shape_detections(results):
-    """Turn raw model results into the frontend detection list.
+    Each raw entry from the HF API looks like:
+        { "score": 0.51, "label": "a handrail",
+          "box": {"xmin": 120, "ymin": 180, "xmax": 280, "ymax": 440} }
 
     Skips detections whose label has no mapped accessibility feature — those
     include the venue-gate keywords (building, storefront, sign, window), which
     are read separately by is_venue().
     """
     detections = []
-    for box, label, score in zip(results["boxes"], results["labels"], results["scores"]):
+    for entry in raw_boxes:
+        label = entry.get("label", "")
+        score = float(entry.get("score", 0.0))
+        if score < MIN_CONFIDENCE:
+            continue
+
         feature = to_feature(label)
         if feature is None:
             continue
 
-        x1, y1, x2, y2 = box.tolist()
+        box = entry.get("box", {})
+        x1 = box.get("xmin", 0)
+        y1 = box.get("ymin", 0)
+        x2 = box.get("xmax", 0)
+        y2 = box.get("ymax", 0)
         bounding_box = {
             "x": round(x1),
             "y": round(y1),
@@ -99,7 +137,7 @@ def _shape_detections(results):
             "height": round(y2 - y1),
         }
 
-        confidence = round(float(score), 2)
+        confidence = round(score, 2)
         detections.append(
             {
                 "cocoLabel": label,
@@ -113,28 +151,47 @@ def _shape_detections(results):
     return detections
 
 
+def _run_model(image_path):
+    """Send an image to the HF Inference API and return (raw_boxes, image_size).
+
+    image_size is (width, height) in pixels — used by framing logic.
+    """
+    # Read the image size locally so framing_hint has real dimensions to work
+    # with. The HF API returns boxes in the input image's coordinate space.
+    with Image.open(image_path) as image:
+        image = image.convert("RGB")
+        image_size = image.size
+
+    with open(image_path, "rb") as fh:
+        image_bytes = fh.read()
+
+    raw = _post_image(image_bytes)
+    return raw, image_size
+
+
 def detect(image_path):
-    """Run Grounding DINO on an image and return a list of detection dicts.
+    """Run the detector on an image and return a list of detection dicts.
 
     Kept for backward compatibility (test_detect.py, direct callers). New
     callers should use analyze() to also get the venue gate + framing hint.
     """
-    results, _size = _run_model(image_path)
-    return _shape_detections(results)
+    raw, _size = _run_model(image_path)
+    return _shape_detections(raw)
 
 
-def is_venue(results):
+def is_venue(raw_boxes):
     """Decide whether the photo looks like a venue at all.
 
-    A shot passes the gate if ANY raw detection (feature-mapped or not)
-    matches a venue keyword above MIN_CONFIDENCE. This uses the raw results
-    rather than the shaped detections list so unmapped labels like "building"
-    or "storefront" still count.
+    A shot passes the gate if ANY raw detection (feature-mapped or not) matches
+    a venue keyword above MIN_CONFIDENCE. This uses the raw response rather
+    than the shaped detections so unmapped labels like "building" or
+    "storefront" still count.
     """
-    for label, score in zip(results["labels"], results["scores"]):
-        text = label.lower()
-        if float(score) < MIN_CONFIDENCE:
+    for entry in raw_boxes:
+        score = float(entry.get("score", 0.0))
+        if score < MIN_CONFIDENCE:
             continue
+        text = entry.get("label", "").lower()
         for kw in VENUE_KEYWORDS:
             if kw in text:
                 return True
@@ -187,10 +244,10 @@ def analyze(image_path):
         "framingHint": str | None,  # short suggestion, or None if framing is fine
       }
     """
-    results, size = _run_model(image_path)
-    detections = _shape_detections(results)
+    raw, size = _run_model(image_path)
+    detections = _shape_detections(raw)
     return {
         "detections": detections,
-        "isVenue": is_venue(results),
+        "isVenue": is_venue(raw),
         "framingHint": framing_hint(detections, size),
     }

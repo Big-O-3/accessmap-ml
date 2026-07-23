@@ -1,8 +1,7 @@
-torch
-transformers
 flask
 flask-cors
 pillow
+requests
 
 # Testing
 pytest
