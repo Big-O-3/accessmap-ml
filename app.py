@@ -16,7 +16,7 @@ import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from detector import analyze as run_analyze
+from detector import ModelUnavailableError, analyze as run_analyze
 
 app = Flask(__name__)
 
@@ -55,7 +55,13 @@ def analyze():
     save_path = os.path.join(UPLOAD_DIR, image.filename)
     image.save(save_path)
 
-    result = run_analyze(save_path)
+    try:
+        result = run_analyze(save_path)
+    except ModelUnavailableError as err:
+        # HF cold-start still going, or a missing token. Give the frontend a
+        # clean 503 instead of a 500 traceback so it can show a "try again".
+        return jsonify({"error": str(err)}), 503
+
     detections = result["detections"]
     return jsonify(
         {
