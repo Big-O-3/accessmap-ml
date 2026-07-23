@@ -16,13 +16,6 @@ detections on the photo.
   which returns detections shaped exactly like the frontend expects.
 - [`app.py`](app.py) wraps that in a small Flask server with two endpoints.
 
-> **Why Grounding DINO and not YOLO-World?** We first used YOLO-World, but it has a
-> blind spot for architectural accessibility features — it could not detect ramps,
-> stairs, or doors at any confidence, even with the larger `yolov8x-world` model (it
-> only reliably saw furniture). Grounding DINO reliably surfaces ramps, handrails,
-> stairs, and doors, which is essential for the core accessibility use case. See the
-> decision log in the project plan for the full rationale.
-
 ## Setup
 
 ```bash
@@ -95,18 +88,25 @@ python tune.py              # run the candidate config and print what it detects
       "boundingBox": { "x": 120, "y": 180, "width": 160, "height": 260 }
     }
   ],
-  "altTextSuggestion": "Detected: door."
+  "altTextSuggestion": "Detected: door.",
+  "isVenue": true,
+  "framingHint": null
 }
 ```
 
-- `cocoLabel` — the Grounding DINO label that matched (kept as `cocoLabel` for frontend
-  compatibility).
+- `cocoLabel` — the Grounding DINO label that matched. The name is a legacy of the API/DB
+  contract (labels aren't COCO classes); kept as-is for compatibility.
 - `accessibilityFeature` — a frontend feature key (must match
   `accessmap-frontend-/src/lib/features.js`).
 - `confidence` — 0.0–1.0.
 - `highConfidence` — `true` when confidence ≥ 0.5; the frontend pre-checks these.
   Lower-confidence detections are still returned, just not pre-checked.
 - `boundingBox` — in original image pixels, `{ x, y, width, height }`.
+- `isVenue` — `false` when the photo doesn't look like a venue (no building/door/etc.
+  detected). Lets the frontend gate obviously off-topic uploads.
+- `framingHint` — a short human-readable suggestion (e.g. `"Step back — the entrance
+  fills most of the frame."`), or `null` when framing looks fine or there's nothing to
+  base a hint on.
 
 ## Files
 
