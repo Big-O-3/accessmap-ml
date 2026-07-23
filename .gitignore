@@ -1,3 +1,8 @@
+# Secrets — never commit real values. Only .env.example (a template) is tracked.
+.env
+.env.local
+.env.*.local
+
 # Python virtual environment
 venv/
 
