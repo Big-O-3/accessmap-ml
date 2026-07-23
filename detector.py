@@ -1,17 +1,15 @@
 """
 detector.py — the actual AI. Loads Grounding DINO once and runs it on a photo.
 
-We use Grounding DINO (an open-vocabulary detector) instead of YOLO-World
-because YOLO-World has a blind spot for architectural accessibility features —
-it could not detect ramps, stairs, or doors at any confidence, while Grounding
-DINO reliably surfaces them.
+Grounding DINO is an open-vocabulary detector: we hand it a plain-English prompt
+listing the accessibility features we care about (ramps, doors, stairs, seating,
+etc.) and it returns boxes matched to those phrases.
 
 Kept separate from the web server (app.py) so you can test the model on its own:
 
     python -c "from detector import detect; import json; print(json.dumps(detect('samples/test.jpg'), indent=2))"
 
-The output shape is unchanged from before (the frontend + Node backend depend
-on it):
+Output shape (the frontend + Node backend depend on it):
 
     {
       "cocoLabel": "a handrail",            # the phrase Grounding DINO matched
@@ -20,6 +18,10 @@ on it):
       "highConfidence": false,
       "boundingBox": {"x": 120, "y": 180, "width": 160, "height": 260}
     }
+
+The "cocoLabel" field name is a legacy of the DB/API contract — Grounding DINO
+labels aren't COCO classes, but the field is baked into the Prisma schema and
+frontend, so it's kept as-is.
 """
 
 import torch
