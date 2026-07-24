@@ -90,8 +90,11 @@ def _run_model(image_path):
         target_sizes=[image.size[::-1]],  # (height, width)
     )[0]
 
+    # Use "text_labels" (strings) over "labels" — in transformers >=4.51 the
+    # "labels" key returns integer IDs, which breaks to_feature(str).
+    label_strings = results.get("text_labels", results["labels"])
     raw_boxes = []
-    for box, label, score in zip(results["boxes"], results["labels"], results["scores"]):
+    for box, label, score in zip(results["boxes"], label_strings, results["scores"]):
         x1, y1, x2, y2 = box.tolist()
         raw_boxes.append(
             {
