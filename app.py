@@ -13,8 +13,14 @@ Then in another terminal:
 
 import os
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
+# Load .env before importing detector so HF_API_TOKEN is in os.environ when
+# detector reads it. In prod (Render / HF), env vars are injected directly
+# and .env is absent — load_dotenv() is a no-op in that case.
+load_dotenv()
 
 from detector import ModelUnavailableError, analyze as run_analyze
 

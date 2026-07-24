@@ -1,7 +1,10 @@
 flask
 flask-cors
 pillow
+python-dotenv
 requests
+torch
+transformers
 
 # Testing
 pytest
